@@ -14,44 +14,64 @@ import (
 var (
 	port           = flag.Int("p", 4007, "Hook listener port number")
 	qSize          = flag.Int("q", 10, "Request backlog length")
+	withBranches   = flag.Bool("b", false, "Process branches")
 	token          = flag.String("t", "", "Secret token")
 	configFilename = flag.String("c", "bitbuckethook.json", "Hook listener config")
 )
 
-func newPayloadHandler(config hookConfig, qSize int) *payloadHandler {
+func newPayloadHandler(config hookConfig, qSize int, withBranches bool) *payloadHandler {
 	if qSize < 0 {
 		qSize = 0
 	}
 	return &payloadHandler{
-		qSize:    qSize,
-		config:   config,
-		incoming: make(chan *Payload, 10),
-		reqs:     make(map[string]chan *Payload),
+		withBranches: withBranches,
+		qSize:        qSize,
+		config:       config,
+		incoming:     make(chan *Payload, 10),
+		reqs:         make(map[string]chan *Payload),
 	}
 }
 
 func (ph *payloadHandler) Loop() {
+	var names []string
+	branches := make(map[string]struct{})
 	for p := range ph.incoming {
-		if args, ok := ph.config[p.Repository.Name]; !ok || len(args) == 0 {
-			continue
+		names = names[:0]
+		names = append(names, p.Repository.Name)
+		if ph.withBranches {
+			for k := range branches {
+				delete(branches, k)
+			}
+			for _, c := range p.Commits {
+				branches[c.Branch] = struct{}{}
+			}
+			for b := range branches {
+				names = append(names, p.Repository.Name+"@"+b)
+			}
 		}
-		if _, ok := ph.reqs[p.Repository.Name]; !ok {
-			c := make(chan *Payload, ph.qSize)
-			ph.reqs[p.Repository.Name] = c
-			go payloadProcessor(c, ph.config[p.Repository.Name])
-		}
-		select {
-		case ph.reqs[p.Repository.Name] <- p:
-		default: // spillover
+		for _, name := range names {
+			if args, ok := ph.config[name]; !ok || len(args) == 0 {
+				continue
+			}
+			if _, ok := ph.reqs[name]; !ok {
+				c := make(chan *Payload, ph.qSize)
+				ph.reqs[name] = c
+				go payloadProcessor(c, ph.config[name])
+			}
+			select {
+			case ph.reqs[name] <- p:
+			default: // spillover
+			}
 		}
 	}
 }
 
 type payloadHandler struct {
-	qSize    int
-	config   hookConfig
-	incoming chan *Payload
-	reqs     map[string]chan *Payload
+	qSize        int
+	withBranches bool
+	config       hookConfig
+	incoming     chan *Payload
+	reqs         map[string]chan *Payload
 }
 
 func (this *payloadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +133,7 @@ func main() {
 		log.Fatal("empty config")
 	}
 
-	handler := newPayloadHandler(config, *qSize)
+	handler := newPayloadHandler(config, *qSize, *withBranches)
 	go handler.Loop()
 
 	addr := fmt.Sprintf(":%d", *port)
