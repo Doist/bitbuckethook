@@ -9,18 +9,49 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 )
 
 var (
 	port           = flag.Int("p", 4007, "Hook listener port number")
+	qSize          = flag.Int("q", 10, "Request backlog length")
 	token          = flag.String("t", "", "Secret token")
 	configFilename = flag.String("c", "bitbuckethook.json", "Hook listener config")
 )
 
+func newPayloadHandler(config hookConfig, qSize int) *payloadHandler {
+	if qSize < 0 {
+		qSize = 0
+	}
+	return &payloadHandler{
+		qSize:    qSize,
+		config:   config,
+		incoming: make(chan *Payload, 10),
+		reqs:     make(map[string]chan *Payload),
+	}
+}
+
+func (ph *payloadHandler) Loop() {
+	for p := range ph.incoming {
+		if args, ok := ph.config[p.Repository.Name]; !ok || len(args) == 0 {
+			continue
+		}
+		if _, ok := ph.reqs[p.Repository.Name]; !ok {
+			c := make(chan *Payload, ph.qSize)
+			ph.reqs[p.Repository.Name] = c
+			go payloadProcessor(c, ph.config[p.Repository.Name])
+		}
+		select {
+		case ph.reqs[p.Repository.Name] <- p:
+		default: // spillover
+		}
+	}
+}
+
 type payloadHandler struct {
-	config hookConfig
-	mutex  sync.Mutex
+	qSize    int
+	config   hookConfig
+	incoming chan *Payload
+	reqs     map[string]chan *Payload
 }
 
 func (this *payloadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,28 +87,19 @@ func (this *payloadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	go this.processPayload(payload)
+	this.incoming <- payload
 }
 
-func (this *payloadHandler) processPayload(payload Payload) {
-	this.mutex.Lock()
-	defer this.mutex.Unlock()
-
-	repoName := payload.Repository.Name
-	command, ok := this.config[repoName]
-	if ok {
-		commandString := strings.Join(command, " ")
-		log.Println(repoName, ":", commandString)
-		cmd := exec.Command(command[0], command[1:]...)
+func payloadProcessor(ch chan *Payload, args []string) {
+	cmdString := strings.Join(args, " ")
+	for p := range ch {
+		log.Printf("%s: %s", p.Repository.Name, cmdString)
+		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		if err != nil {
+		if err := cmd.Run(); err != nil {
 			log.Println(err)
 		}
-	} else {
-		log.Println(repoName, ":", "handler not found")
 	}
 }
 
@@ -87,12 +109,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if len(config) == 0 {
+		log.Fatal("empty config")
+	}
 
-	handler := payloadHandler{config: config}
+	handler := newPayloadHandler(config, *qSize)
+	go handler.Loop()
 
 	addr := fmt.Sprintf(":%d", *port)
-	err = http.ListenAndServe(addr, &handler)
-	if err != nil {
-		log.Fatal("ListenAndServe:", err)
-	}
+	log.Fatal(http.ListenAndServe(addr, handler))
 }
