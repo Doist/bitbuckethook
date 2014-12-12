@@ -40,7 +40,10 @@ type repository struct {
 	Website     string `json:"website"`
 }
 
-func parsePayload(body string) (payload Payload, err error) {
-	err = json.Unmarshal([]byte(body), &payload)
-	return
+func parsePayload(body string) (*Payload, error) {
+	payload := new(Payload)
+	if err := json.Unmarshal([]byte(body), payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }

@@ -21,6 +21,10 @@ As you start a hook server, you could define following options
   default value is "bitbuckethook.json" in current directory)
 - `-p`: port to listen (default is 4007)
 - `-t`: optional secret token
+- `-q`: per repository request backlog size (queue)
+- `-b`: also use branches for command matching; if set, repositories can also
+  be specified as `repoName@branchName` (can impose security risk if repo has @
+  in its name)
 
 If you launch the command as
 
